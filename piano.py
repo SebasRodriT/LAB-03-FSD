@@ -118,3 +118,4 @@ with sd.OutputStream(samplerate=FS, channels=1, callback=audio_callback):
         root, canvas = crear_piano()
         actualizar_piano(root, canvas)
         root.mainloop()
+3
