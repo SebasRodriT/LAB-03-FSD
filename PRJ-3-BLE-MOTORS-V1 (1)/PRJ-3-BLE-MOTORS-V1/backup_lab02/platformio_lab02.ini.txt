@@ -1,0 +1,57 @@
+; PlatformIO Project Configuration File
+;
+;   Build options: build flags, source filter
+;   Upload options: custom upload port, speed and extra flags
+;   Library options: dependencies, extra library storages
+;   Advanced options: extra scripting
+;
+; Please visit documentation for the other options and examples
+; https://docs.platformio.org/page/projectconf.html
+
+[env:esp32c3mini]
+
+; ── Plataforma y framework ───────────────────────────────
+platform  = espressif32
+framework = arduino
+
+; Board oficial LOLIN C3 Mini (recomendado)
+board     = lolin_c3_mini           ; o: esp32-c3-devkitm-1
+
+; ── Versión de plataforma ────────────────────────────────
+; Fijar versión evita cambios de API entre actualizaciones.
+; 6.x = IDF 5.x (recomendado para C3)
+platform_packages =
+    framework-arduinoespressif32 @ 3.20017.0
+
+; ── CPU y flash ─────────────────────────────────────────
+board_build.f_cpu          = 160000000L      ; 160 MHz (máximo C3)
+board_build.f_flash        = 80000000L
+board_build.flash_mode     = dio
+board_build.partitions     = default.csv    ; 4 MB sin OTA
+
+; ── USB CDC — crítico para Serial por USB ───────────────
+; Sin esto Serial.print() no aparece en el monitor.
+build_flags =
+    -DARDUINO_USB_MODE=1
+    -DARDUINO_USB_CDC_ON_BOOT=1
+    -DCORE_DEBUG_LEVEL=0            ; 0=ninguno 3=info 5=verbose
+    -DBOARD_HAS_PSRAM=0
+
+; ── Upload por USB-CDC (no UART) ────────────────────────
+upload_speed     = 921600
+upload_protocol  = esptool
+upload_port      = COM7       ; Linux/Mac · Win: COMx
+
+; Monitor serie (USB-CDC)
+monitor_port     = COM7
+monitor_speed    = 115200
+monitor_filters  = esp32_exception_decoder, colorize
+monitor_rts = 0
+monitor_dtr = 0
+
+; ── Dependencias ────────────────────────────────────────
+lib_deps =
+    h2zero/NimBLE-Arduino@^2.2.0
+
+; ── Optimización ────────────────────────────────────────
+build_type       = release

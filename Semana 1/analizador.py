@@ -16,6 +16,9 @@ FS = 16000
 N = 1024
 UMBRAL = 0.002     # magnitud lineal minima para considerar que hay señal
 USAR_DB = True     # True: espectro en dB, False: magnitud lineal
+DB_MIN = -130      # piso del espectro en dB (microfono en silencio ~ -110 dB)
+LIM_MIN = 0.005    # amplitud minima del eje de la señal en el tiempo
+lim_t = LIM_MIN
 DELTA_F = FS / N
 T_VENTANA = N / FS * 1000
 t = np.arange(N) / FS * 1000
@@ -84,6 +87,12 @@ def update_plot(frame):
     if x is None:
         return artistas
 
+    global lim_t
+    pico_t = float(np.max(np.abs(x)))
+    lim_t = min(1.0, max(LIM_MIN, 1.2 * pico_t, 0.9 * lim_t))
+    ax1.set_ylim(-lim_t, lim_t)
+    ax1.set_title(f"Pico de la señal: {pico_t:.4f}", fontsize=9)
+
     mag_rect, mag_ham, f_pico, m_pico = calcular_espectro(x)
     line_t.set_ydata(x)
     line_rect.set_ydata(mag_rect)
@@ -113,7 +122,7 @@ try:
     ax1.set_ylabel("Amplitud")
     ax1.grid(True)
 
-    y0 = -100 if USAR_DB else 0
+    y0 = DB_MIN if USAR_DB else 0
     line_rect, = ax2.plot(freqs, np.full(len(freqs), y0), label="Sin ventana")
     line_ham, = ax2.plot(freqs, np.full(len(freqs), y0), label="Hamming")
     marker, = ax2.plot([], [], 'ro')
@@ -121,7 +130,7 @@ try:
                      ha='right', va='top')
     ax2.set_xlim(0, FS / 2)
     if USAR_DB:
-        ax2.set_ylim(-100, 0)
+        ax2.set_ylim(DB_MIN, 0)
         ax2.set_ylabel("Magnitud (dB)")
     else:
         ax2.set_ylim(0, 0.1)
@@ -137,7 +146,7 @@ try:
         device=args.device, channels=1, samplerate=FS,
         blocksize=N, callback=audio_callback)
     ani = FuncAnimation(fig, update_plot, interval=args.interval,
-                        blit=True, cache_frame_data=False)
+                        blit=False, cache_frame_data=False)
     with stream:
         plt.show()
 except Exception as e:

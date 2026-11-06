@@ -1,0 +1,411 @@
+/*
+ * ============================================================================
+ *   ROBOT CONTROLADO POR BLUETOOTH CON LA ESP32-C3 SUPER MINI
+ * ============================================================================
+ *
+ *   ¿QUÉ HACE ESTE PROGRAMA?
+ *   Permite manejar un robot de dos motores desde una app del celular
+ *   (por Bluetooth) o desde el computador (por el cable USB). Le enviamos
+ *   ordenes como "avanza", "retrocede" o "gira", y el robot obedece.
+ *
+ *   LOS COMANDOS QUE ENTIENDE EL ROBOT:
+ *     ad #   ->  AvanzaR hacia ADelante     (# es la velocidad, de 0 a 255)
+ *     at #   ->  Retroceder hacia ATras     (# es la velocidad, de 0 a 255)
+ *     gh #   ->  Girar a la derecha (Horario)
+ *     ga #   ->  Girar a la izquierda (Antihorario)
+ *     stop   ->  Detener los dos motores
+ *
+ *   El "#" es un número de 0 a 255:
+ *     0   = quieto (sin fuerza)
+ *     255 = velocidad máxima
+ *   Es como el acelerador de un carro: a mayor número, más rápido.
+ *
+ *   ¿CÓMO SE MUEVE UN ROBOT DE DOS MOTORES?
+ *   Imagina el robot visto desde arriba, con una rueda a cada lado:
+ *     - Si las DOS ruedas giran hacia adelante -> el robot AVANZA.
+ *     - Si las DOS giran hacia atras           -> el robot RETROCEDE.
+ *     - Si una avanza y la otra queda quieta   -> el robot GIRA hacia un lado.
+ *
+ *   IDEA IMPORTANTE - EL "DRIVER" DE MOTORES (placa roja Mini L298):
+ *   La ESP32 es muy delicada y no puede mover motores directamente
+ *   (los motores necesitan mucha corriente). Por eso usamos un "driver":
+ *   es como un musculo que recibe las ordenes suaves de la ESP32 y las
+ *   convierte en la fuerza necesaria para mover los motores.
+ *
+ *   Cada motor se controla con DOS cables (dos pines):
+ *     - Si ponemos fuerza (PWM) en el pin A y nada en el B -> gira en un sentido.
+ *     - Si ponemos nada en A y fuerza en el B               -> gira al reves.
+ *     - Si ponemos nada en ambos                            -> se detiene.
+ *
+ *   ¿QUÉ ES PWM Y QUÉ ES UN "CANAL"?
+ *   PWM es una forma de controlar la VELOCIDAD. En lugar de dar toda la
+ *   energia o nada, la damos "a pedacitos" muy rapidos. Mientras mas
+ *   pedacitos, mas rapido gira el motor (numero de 0 a 255).
+ *   En esta version de la placa, cada pin se controla a traves de un
+ *   "canal" PWM: es como darle a cada pin su propio grifo de energia.
+ *
+ *   ----------------------------------------------------------------------
+ *   Licencia académica (uso no comercial, requiere atribución)
+ *   Copyright (C) 2026 Fredy Segura-Quijano, Universidad de los Andes.
+ *   Contacto: fsegura@uniandes.edu.co
+ *
+ *   NECESITAS INSTALAR: la librería "NimBLE-Arduino" (versión 2.x).
+ *   NOTA: este código usa la API de PWM del core 2.x de ESP32
+ *   (ledcSetup / ledcAttachPin / ledcWrite por canal).
+ * ============================================================================
+ */
+
+// ---- Estas dos líneas "traen" las herramientas que vamos a usar ----
+#include <Arduino.h>      // Herramientas básicas de la placa
+#include <NimBLEDevice.h> // Herramientas del Bluetooth BLE
+
+
+// ============================================================================
+//   CONFIGURACIÓN DEL BLUETOOTH (nombre y "direcciones")
+// ============================================================================
+
+// Nombre que aparece en el celular al buscar el robot. Puedes cambiarlo.
+const char* DEVICE_NAME = "ROBOT-FSD-JSRT";
+
+// "Direcciones" del servicio (oficina) y la característica (buzón).
+// Deben coincidir EXACTAMENTE con los de la app del celular.
+#define SERVICE_UUID  "FFE0"
+#define CHAR_UUID     "FFE1"
+
+
+// ============================================================================
+//   CONFIGURACIÓN DE LOS MOTORES (los pines, los canales y la velocidad)
+// ============================================================================
+//
+// Cada motor usa DOS pines de la ESP32. Estos cables van al driver (placa roja),
+// y el driver los conecta a los motores.
+//
+//   MOTOR A (por ejemplo, la rueda izquierda):
+const int MOTOR_A_1 = 0;   // GPIO0  -> entrada IN1 del driver
+const int MOTOR_A_2 = 1;   // GPIO1  -> entrada IN2 del driver
+//
+//   MOTOR B (por ejemplo, la rueda derecha):
+const int MOTOR_B_1 = 3;   // GPIO3  -> entrada IN3 del driver
+const int MOTOR_B_2 = 4;   // GPIO4  -> entrada IN4 del driver
+
+// Ajustes del PWM (la "fuerza a pedacitos"):
+const int PWM_FREQ = 1000;   // Velocidad de los pedacitos (1000 veces por segundo).
+                             // Si los motores zumban o chillan, sube a 20000.
+const int PWM_RES  = 8;      // Resolucion de 8 bits -> valores de 0 a 255.
+
+// Canales PWM: cada pin necesita su propio "grifo de energia" (canal).
+// Como tenemos 4 pines, usamos 4 canales distintos (0, 1, 2 y 3).
+const int CH_A_1 = 0;   // canal para el pin MOTOR_A_1
+const int CH_A_2 = 1;   // canal para el pin MOTOR_A_2
+const int CH_B_1 = 2;   // canal para el pin MOTOR_B_1
+const int CH_B_2 = 3;   // canal para el pin MOTOR_B_2
+
+
+// ============================================================================
+//   VARIABLES QUE USAREMOS EN TODO EL PROGRAMA
+// ============================================================================
+
+// Un "puntero" al buzón (la característica) para usarlo desde cualquier parte.
+NimBLECharacteristic* pChar = nullptr;
+
+// Nos dice si hay un celular conectado (true) o no (false).
+bool deviceConnected = false;
+
+// Avisos de que más abajo existen estas funciones (las explicamos luego).
+void procesarComando(String input);
+void responder(const String& msg);
+void motorA(int velocidad, bool adelante);
+void motorB(int velocidad, bool adelante);
+void parar();
+
+
+// ============================================================================
+//   AVISOS DE CONEXIÓN: ¿alguien se conectó o se desconectó?
+// ============================================================================
+//
+// Este es el "portero": nos avisa cuando un celular se conecta o se va.
+//
+class ServerCallbacks : public NimBLEServerCallbacks {
+
+  // Se ejecuta SOLITA cuando un celular SE CONECTA.
+  void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
+    deviceConnected = true;
+    Serial.println(">> Celular conectado");
+  }
+
+  // Se ejecuta SOLITA cuando un celular SE DESCONECTA.
+  void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
+    deviceConnected = false;
+    Serial.println(">> Celular desconectado");
+
+    // MEDIDA DE SEGURIDAD: si el celular se desconecta de repente,
+    // detenemos los motores para que el robot no salga disparado solo.
+    parar();
+
+    // Nos volvemos a anunciar para que otro celular pueda encontrarnos.
+    NimBLEDevice::startAdvertising();
+  }
+};
+
+
+// ============================================================================
+//   BUZÓN DE ENTRADA: ¿el celular nos envió un comando?
+// ============================================================================
+//
+// Se ejecuta cada vez que el celular nos escribe. Tomamos el mensaje
+// (que es un comando como "ad 200") y lo mandamos a procesar.
+//
+class CharCallbacks : public NimBLECharacteristicCallbacks {
+
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& info) override {
+    std::string rx = c->getValue();   // Sacamos el comando del buzón
+
+    if (rx.length() > 0) {
+      String comando = String(rx.c_str());
+      Serial.print("Comando recibido por Bluetooth: ");
+      Serial.println(comando);
+      procesarComando(comando);       // Lo interpretamos y obedecemos
+    }
+  }
+};
+
+
+// ============================================================================
+//   FUNCIÓN PARA RESPONDER AL CELULAR (y mostrar en el computador)
+// ============================================================================
+//
+// La usamos para confirmar lo que hicimos. El mensaje sale por el buzón
+// (para el celular) y también por el cable USB (para el computador).
+//
+void responder(const String& msg) {
+  // Mostramos siempre en el computador.
+  Serial.println(msg);
+
+  // Si hay un celular conectado, también le enviamos la respuesta.
+  if (deviceConnected && pChar) {
+    pChar->setValue(msg.c_str());
+    pChar->notify();   // Le damos un "toque": ¡hay respuesta!
+  }
+}
+
+
+// ============================================================================
+//   FUNCIONES QUE MUEVEN CADA MOTOR
+// ============================================================================
+//
+// Cada motor tiene dos pines (y cada pin su canal). Para que gire, ponemos
+// PWM (fuerza) en un canal y 0 (nada) en el otro. El sentido depende de en
+// cuál pongamos la fuerza. ¡Ojo! Escribimos al CANAL, no al pin.
+//
+
+// Mueve el MOTOR A. Si "adelante" es true gira hacia adelante; si es false, al reves.
+void motorA(int velocidad, bool adelante) {
+  if (adelante) {
+    ledcWrite(CH_A_1, velocidad);  // Fuerza en el canal del pin 1
+    ledcWrite(CH_A_2, 0);          // Nada en el canal del pin 2
+  } else {
+    ledcWrite(CH_A_1, 0);          // Nada en el canal del pin 1
+    ledcWrite(CH_A_2, velocidad);  // Fuerza en el canal del pin 2
+  }
+}
+
+// Mueve el MOTOR B, igual que el A pero con sus propios canales.
+void motorB(int velocidad, bool adelante) {
+  if (adelante) {
+    ledcWrite(CH_B_1, velocidad);
+    ledcWrite(CH_B_2, 0);
+  } else {
+    ledcWrite(CH_B_1, 0);
+    ledcWrite(CH_B_2, velocidad);
+  }
+}
+
+// Detiene los DOS motores poniendo todos los canales en 0 (sin fuerza).
+void parar() {
+  ledcWrite(CH_A_1, 0);
+  ledcWrite(CH_A_2, 0);
+  ledcWrite(CH_B_1, 0);
+  ledcWrite(CH_B_2, 0);
+}
+
+
+// ============================================================================
+//   MOVIMIENTOS DEL ROBOT (combinando los dos motores)
+// ============================================================================
+//
+// Aqui combinamos los dos motores para lograr cada movimiento del robot.
+//
+
+// AVANZAR: las dos ruedas giran hacia adelante.
+void adelante(int velocidad) {
+  motorA(velocidad, true);
+  motorB(velocidad, true);
+  responder("Avanzando a velocidad " + String(velocidad));
+}
+
+// RETROCEDER: las dos ruedas giran hacia atras.
+void atras(int velocidad) {
+  motorA(velocidad, false);
+  motorB(velocidad, false);
+  responder("Retrocediendo a velocidad " + String(velocidad));
+}
+
+// GIRAR A LA DERECHA (horario): rueda A adelante, rueda B quieta.
+void giroHorario(int velocidad) {
+  motorA(velocidad, true);
+  motorB(0, true);
+  responder("Girando a la derecha a velocidad " + String(velocidad));
+}
+
+// GIRAR A LA IZQUIERDA (antihorario): rueda A quieta, rueda B adelante.
+void giroAntihorario(int velocidad) {
+  motorA(0, true);
+  motorB(velocidad, true);
+  responder("Girando a la izquierda a velocidad " + String(velocidad));
+}
+
+
+// ============================================================================
+//   ENTENDER LOS COMANDOS (traducir el texto en movimiento)
+// ============================================================================
+//
+// Aqui recibimos un texto como "ad 200" y lo separamos en dos partes:
+//   - La accion ("ad")  -> que hacer
+//   - El numero (200)   -> que tan rapido
+// Luego llamamos al movimiento correcto.
+//
+void procesarComando(String input) {
+  input.trim();          // Quitamos espacios y saltos de linea sobrantes
+  input.toLowerCase();   // Convertimos a minusculas (asi "AD" y "ad" son iguales)
+
+  if (input.length() == 0) return;  // Si esta vacio, no hacemos nada
+
+  // --- Caso especial: "stop" no lleva numero ---
+  if (input == "stop") {
+    parar();
+    responder("Robot detenido");
+    return;
+  }
+
+  // --- Los demas comandos llevan un numero. Buscamos el espacio ---
+  // Ejemplo: en "ad 200", el espacio separa "ad" del "200".
+  int espacio = input.indexOf(' ');
+  if (espacio < 0) {
+    // No hay espacio: el formato esta mal escrito.
+    responder("Error: escribe el comando y la velocidad, por ejemplo: ad 200");
+    return;
+  }
+
+  // Separamos las dos partes.
+  String accion = input.substring(0, espacio);       // Lo de antes del espacio
+  String numeroTexto = input.substring(espacio + 1); // Lo de despues del espacio
+  numeroTexto.trim();
+
+  // Convertimos el texto del numero a un numero de verdad.
+  int velocidad = numeroTexto.toInt();
+
+  // Nos aseguramos de que la velocidad quede entre 0 y 255 (ni menos, ni mas).
+  velocidad = constrain(velocidad, 0, 255);
+
+  // --- Segun la accion, llamamos al movimiento correcto ---
+  if (accion == "ad") {
+    adelante(velocidad);
+  } else if (accion == "at") {
+    atras(velocidad);
+  } else if (accion == "gh") {
+    giroHorario(velocidad);
+  } else if (accion == "ga") {
+    giroAntihorario(velocidad);
+  } else {
+    // La accion no es ninguna de las que conocemos.
+    responder("Error: comando desconocido. Usa: ad, at, gh, ga o stop");
+  }
+}
+
+
+// ============================================================================
+//   SETUP: la preparación inicial (se ejecuta UNA SOLA VEZ al encender)
+// ============================================================================
+//
+// Alistamos todo: el USB, los motores y el Bluetooth.
+//
+void setup() {
+  // --- Encendemos la comunicación con el computador por USB ---
+  Serial.begin(115200);
+
+  // Esperamos un momento a que se abra el monitor serial (máx. 3 segundos).
+  unsigned long t0 = millis();
+  while (!Serial && (millis() - t0 < 3000)) {
+    delay(10);
+  }
+  delay(300);
+
+  // --- Preparamos cada pin con su canal PWM (API del core 2.x) ---
+  // ledcSetup    -> crea el canal (le dice su frecuencia y resolucion).
+  // ledcAttachPin-> conecta ese canal a un pin fisico de la placa.
+  ledcSetup(CH_A_1, PWM_FREQ, PWM_RES);  ledcAttachPin(MOTOR_A_1, CH_A_1);
+  ledcSetup(CH_A_2, PWM_FREQ, PWM_RES);  ledcAttachPin(MOTOR_A_2, CH_A_2);
+  ledcSetup(CH_B_1, PWM_FREQ, PWM_RES);  ledcAttachPin(MOTOR_B_1, CH_B_1);
+  ledcSetup(CH_B_2, PWM_FREQ, PWM_RES);  ledcAttachPin(MOTOR_B_2, CH_B_2);
+
+  parar();  // Por seguridad, arrancamos con los motores quietos.
+
+  // --- Encendemos el Bluetooth y le ponemos nombre ---
+  NimBLEDevice::init(DEVICE_NAME);
+
+  // Creamos el servidor (la placa que ofrece el servicio).
+  NimBLEServer* pServer = NimBLEDevice::createServer();
+  pServer->setCallbacks(new ServerCallbacks());  // Le conectamos el "portero"
+
+  // Creamos la oficina (servicio FFE0).
+  NimBLEService* pService = pServer->createService(SERVICE_UUID);
+
+  // Creamos el buzón (característica FFE1) con sus permisos.
+  pChar = pService->createCharacteristic(
+      CHAR_UUID,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE |
+      NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
+  pChar->setCallbacks(new CharCallbacks());  // Le conectamos el "buzón de entrada"
+  pChar->setValue("Robot listo");            // Mensaje inicial en el buzón
+
+  // Abrimos la oficina. (En NimBLE 2.x los servicios arrancan junto con el
+  // servidor, asi que esta linea muestra un aviso inofensivo; puede quedarse.)
+  pService->start();
+
+  // --- Nos anunciamos para que el celular nos encuentre ---
+  NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
+  pAdv->addServiceUUID(SERVICE_UUID);   // Primer aviso: la dirección de la oficina
+
+  // Segundo aviso (scan response): el nombre del robot.
+  NimBLEAdvertisementData scanResp;
+  scanResp.setName(DEVICE_NAME);
+  pAdv->setScanResponseData(scanResp);
+
+  pAdv->enableScanResponse(true);
+  NimBLEDevice::startAdvertising();  // ¡Empezamos a anunciarnos!
+
+  // --- Mensajes de bienvenida en el computador ---
+  Serial.println("\n=== ROBOT BLE listo ===");
+  Serial.print("Nombre: "); Serial.println(DEVICE_NAME);
+  Serial.println("Comandos: ad #, at #, gh #, ga #, stop  (# de 0 a 255)");
+  Serial.println("Puedes enviar comandos por Bluetooth o por este monitor serial.");
+}
+
+
+// ============================================================================
+//   LOOP: el ciclo que se repite SIEMPRE
+// ============================================================================
+//
+// Revisamos constantemente si llegó un comando por el cable USB. Los comandos
+// por Bluetooth NO se revisan aqui: llegan solos al "buzón de entrada".
+//
+void loop() {
+
+  // ¿Escribimos un comando en el monitor serial del computador?
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');  // Leemos hasta el Enter
+    procesarComando(input);                        // Lo interpretamos y obedecemos
+  }
+
+  delay(10);  // Una pausa muy corta para no saturar la placa.
+}
